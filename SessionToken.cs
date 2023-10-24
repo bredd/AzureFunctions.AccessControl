@@ -5,9 +5,9 @@ CodeBit Metadata
 &description="Classes to create, read, and validate secure session tokens."
 &author="Brandt Redd"
 &url=https://raw.githubusercontent.com/bredd/AzureFunctions.AccessControl/main/SessionToken.cs
-&version=1.0.0
+&version=1.0.1
 &keywords=CodeBit
-&datePublished=2023-10-10
+&datePublished=2023-10-24
 &license=https://opensource.org/licenses/BSD-3-Clause
 
 About Codebits: http://www.filemeta.org/CodeBit
