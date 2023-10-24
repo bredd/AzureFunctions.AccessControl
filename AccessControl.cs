@@ -85,7 +85,7 @@ namespace Bredd.AzureFunctions
     static class AccessControl
     {
         static readonly TimeSpan c_keyRenewalInterval = TimeSpan.FromDays(180);
-        const int c_defaultTokenExpirationMinutes = 90;
+        const int c_defaultTokenExpirationMinutes = 30;
 
         const string c_accessControlLogCategory = "AccessControl";
         const string c_keyFileName = "fackey.txt"; // Access token keys are created and stored here.
@@ -281,7 +281,7 @@ namespace Bredd.AzureFunctions
         }
 
         /// <summary>
-        /// Authenticate an http request handlign the complexities of CORS security in authorized cross-origin applications.
+        /// Authenticate an http request handling the complexities of CORS security in authorized cross-origin applications.
         /// </summary>
         /// <param name="req">The current <see cref="HttpRequest"/></param>
         /// <returns>Null if authentication succeeded. Otherwise, an IActionResult instance that should be returned to the caller.</returns>
