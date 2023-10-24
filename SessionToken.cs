@@ -109,6 +109,15 @@ namespace Bredd.Security
             }
         }
 
+        // This is equivalent to RandomNumberGenerator.GetBytes() which is available in .net 8 and later
+        static byte[] RandomNumberGenerator_GetBytes(int count)
+        {
+            var rng = new RNGCryptoServiceProvider();
+            var keyBytes = new byte[count];
+            rng.GetBytes(keyBytes);
+            return keyBytes;
+        }
+
         /// <summary>
         /// Create and add a key to the keyset.
         /// </summary>
@@ -118,7 +127,7 @@ namespace Bredd.Security
         public SessionTokenKey CreateKey()
         {
             int id = (m_newestKeyId + 1) % KeyIdLimit;
-            var key = new SessionTokenKey(id, RandomNumberGenerator.GetBytes(KeySize), DateTime.UtcNow);
+            var key = new SessionTokenKey(id, RandomNumberGenerator_GetBytes(KeySize), DateTime.UtcNow);
             AddKey(key);
             return key;
         }
@@ -146,7 +155,7 @@ namespace Bredd.Security
                 int count = 0;
                 for (int i = 0; i < KeyIdLimit; ++i)
                 {
-                    if (m_keys[i] is not null) count++;
+                    if (!(m_keys[i] is null)) count++;
                 }
                 return count;
             }
@@ -173,7 +182,7 @@ namespace Bredd.Security
             int c = 0;
             for (int i=0; i<KeyIdLimit; ++i)
             {
-                if (m_keys[i] is not null) keys[c++] = m_keys[i];
+                if (!(m_keys[i] is null)) keys[c++] = m_keys[i];
             }
             return keys;
         }
