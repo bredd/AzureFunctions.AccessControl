@@ -5,9 +5,9 @@ CodeBit Metadata
 &description="Class to manage access to Azure Functions including managing session tokens and CORS access."
 &author="Brandt Redd"
 &url=https://raw.githubusercontent.com/bredd/AzureFunctions.AccessControl/main/AccessControl.cs
-&version=1.0.0
+&version=1.0.1
 &keywords=CodeBit
-&datePublished=2023-10-10
+&datePublished=2023-10-24
 &license=https://opensource.org/licenses/BSD-3-Clause
 
 About Codebits: http://www.filemeta.org/CodeBit
@@ -54,13 +54,12 @@ using System.Threading.Tasks;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.AspNetCore.Http;
 using Microsoft.Extensions.Logging;
-using FileMeta.CodeBit;
 using Microsoft.Extensions.DependencyInjection;
 using System.Runtime.CompilerServices;
-using Microsoft.Identity.Client;
 using System.Linq;
-using Microsoft.Azure.WebJobs.Extensions.Timers;
 using Microsoft.Extensions.Primitives;
+using Bredd.Security;
+using Newtonsoft.Json.Linq;
 
 namespace Bredd.AzureFunctions
 {
@@ -68,7 +67,7 @@ namespace Bredd.AzureFunctions
     /// Access Control for Azure Functions
     /// </summary>
     /// <remarks>
-    /// <para>Provides access control by storing session tokens in two way. The two
+    /// <para>Provides access control by storing session tokens in two ways. The two
     /// methods can be used together but usually one or the other will be used.
     /// </para>
     /// <para>For a UI application directly accessing date, session tokens are transmitted
@@ -86,18 +85,25 @@ namespace Bredd.AzureFunctions
     static class AccessControl
     {
         static readonly TimeSpan c_keyRenewalInterval = TimeSpan.FromDays(180);
+        const int c_defaultTokenExpirationMinutes = 90;
 
         const string c_accessControlLogCategory = "AccessControl";
-        const string c_keyFileName = "fackey.txt";
+        const string c_keyFileName = "fackey.txt"; // Access token keys are created and stored here.
         const string c_keyFileDir = "data"; // Relative to %HOME%
         const string c_authCookie = "SessionToken";
         const string c_bearerPrefix = "Bearer ";
         const string c_itemsTokenKey = "_SessionToken_";
+        const string c_authorizationHeader = "Authorization";
+        const string c_authenticationInfoHeader = "Authentication-Info";
+
 
         static readonly Encoding s_UTF8 = new UTF8Encoding(false);
 
         static bool s_initialized = false;
-        static SessionTokenManager s_tokenMgr = new SessionTokenManager();
+        static SessionTokenManager s_tokenMgr = new SessionTokenManager()
+        {
+            DefaultExpiration = TimeSpan.FromMinutes(c_defaultTokenExpirationMinutes)
+        };
         static ILogger s_log;
 
         #region Public Interface
@@ -124,7 +130,7 @@ namespace Bredd.AzureFunctions
             }
 
             // Look for an Authorization header
-            foreach (var value in req.Headers["Authorization"])
+            foreach (var value in req.Headers[c_authorizationHeader])
             {
                 if (value.StartsWith(c_bearerPrefix, StringComparison.OrdinalIgnoreCase))
                 {
@@ -158,7 +164,6 @@ namespace Bredd.AzureFunctions
             {
                 token["o"] = GetOrigin(context.Request);
             }
-
             return s_tokenMgr.SignToken(token);
         }
 
@@ -207,24 +212,43 @@ namespace Bredd.AzureFunctions
         /// </summary>
         /// <param name="token">The <see cref="SessionToken"/> to be signed and set.</param>
         /// <param name="context">The <see cref="HttpContext"/> of the current request.</param>
-        public static void SetAuthCookie(SessionToken token, HttpContext context)
+        /// <returns>The signed token in string form.</returns>
+        public static string SetAuthCookie(SessionToken token, HttpContext context)
         {
-            AssureInitialized(context);
-            var signed = s_tokenMgr.SignToken(token);
+            var signed = SignToken(context, token);
             var co = new CookieOptions();
             co.Expires = token.Expiration;
             co.Path = "/";
             context.Response.Cookies.Append(c_authCookie, signed, co);
+            return signed;
         }
 
         /// <summary>
-        /// Clear the authentication cookie.
+        /// Sign a token and set the Authentication-Info header with its value 
+        /// </summary>
+        /// <param name="token">The <see cref="SessionToken"/> to be signed and set.</param>
+        /// <param name="context">The <see cref="HttpContext"/> of the current request.</param>
+        /// <returns>The signed token in string form.</returns>
+        public static string SetAuthHeader(SessionToken token, HttpContext context)
+        {
+            var signed = SignToken(context, token);
+            var res = context.Response;
+            res.Headers[c_authenticationInfoHeader] = "Bearer-Update = " + signed;
+            res.Headers["Access-Control-Expose-Headers"] = c_authenticationInfoHeader;
+            return signed;
+        }
+
+        /// <summary>
+        /// Clear authentication cookie and/or authentication header.
         /// </summary>
         /// <param name="context">The <see cref="HttpContext"/> of the current request.</param>
         /// <remarks>This is typically used to log out the user.</remarks>
-        public static void ClearAuthCookie(HttpContext context)
+        public static void ClearAuthentication(HttpContext context)
         {
-            context.Response.Cookies.Delete(c_authCookie);
+            if (context.Request.Cookies.ContainsKey(c_authCookie))
+                context.Response.Cookies.Delete(c_authCookie);
+            if (context.Request.Headers.ContainsKey(c_authorizationHeader))
+                context.Response.Headers[c_authenticationInfoHeader] = "Bearer-Update = clear";
         }
 
         /// <summary>
@@ -238,7 +262,7 @@ namespace Bredd.AzureFunctions
         /// response.
         /// </para>
         /// <para>If a regular (not preflight) request, checks for an Origin header. Returns an error
-        /// if it's not present
+        /// if it's not present.
         /// </para>
         /// <para>Adds the Access-Control-Allow-Origin and Access-Control-Expose-Headers headers so that
         /// API requests are accepted.
@@ -253,28 +277,31 @@ namespace Bredd.AzureFunctions
 
             var res = req.HttpContext.Response;
             res.Headers["Access-Control-Allow-Origin"] = origin;
-            res.Headers["Access-Control-Expose-Headers"] = "Authentication-Info";
             return null;
         }
 
         /// <summary>
-        /// Authenticate an http request.
+        /// Authenticate an http request handlign the complexities of CORS security in authorized cross-origin applications.
         /// </summary>
-        /// <param name="req"></param>
-        /// <returns>True if authentication successes. Else, false.</returns>
+        /// <param name="req">The current <see cref="HttpRequest"/></param>
+        /// <returns>Null if authentication succeeded. Otherwise, an IActionResult instance that should be returned to the caller.</returns>
         /// <remarks>
         /// <para>Looks in the cookies and the headers for a valid authentication token.
         /// </para>
-        /// <para>If a token is found in the cookies, the cookie expiration is renewed.
+        /// <para>If a valid token is found in the cookies, the token expiration is renewed and issued in an updated cookie.
         /// </para>
+        /// <para>If a valid token is found in the Authentication header, the token expiration is renewed and returned to the caller
+        /// in an "Authentication-Info: Refresh-Token" header.
+        /// </para>
+        /// <para>If a valid token indicates an authorized origin, adds an "Access-Control-Allow</para>
         /// <para>The unpacked <see cref="SessionToken"/> is stored in
         /// <see cref="HttpContext.Items"/>[<see cref="AccessControl.c_itemsTokenKey"/>] for
         /// future reference.
         /// </para>
-        /// <para>Typically, a false return will result in sending an <see cref="UnauthorizedMessageResult"/> as follows:
+        /// <para>Potential IActionResult return values are a PreFlight result for an HTTP OPTIONS call and a
+        /// <see cref="MessageResult.UnauthorizedResult"/>.
         /// </para>
-        /// <code>if (!AuthenticateRequest(req)) return new UnauthorizedMessageResult();
-        /// </code>
+        /// <para>For greater control over actions, use <see cref="GetAuthentication(HttpRequest)"/>
         /// </remarks>
         public static IActionResult AuthenticateRequest(HttpRequest req)
         {
@@ -424,11 +451,15 @@ namespace Bredd.AzureFunctions
         static string s_keyFilePath;
 
         // On Azure, files in %HOME%/data are shared between instances of the function app.
+        // This function returns the full path to the key file. When running on a local machine (Azure Emulator)
+        // the file goes into the temp directory. When running in an operational Azure Functions context,
+        // the file goes in the %HOME%/data directory which, per Azure specifications, is shared between
+        // instances of the application.
         static string KeyFilePath
         {
             get
             {
-                if (s_keyFilePath is not null) return s_keyFilePath;
+                if (!(s_keyFilePath is null)) return s_keyFilePath;
                 if (string.Equals(Environment.GetEnvironmentVariable("AZURE_FUNCTIONS_ENVIRONMENT", EnvironmentVariableTarget.Process),
                     "Development", StringComparison.OrdinalIgnoreCase))
                 {
@@ -456,12 +487,12 @@ namespace Bredd.AzureFunctions
 
         private static void RefreshToken(HttpContext http, SessionToken token)
         {
-            // Refresh the toke (so it doesn't expire)
+            // Refresh the token (so it doesn't expire)
             // This only works if the client recognizes Authentication-Info: Refresh-Token
             var refreshed = s_tokenMgr.Refresh(token);
             var res = http.Response;
-            res.Headers["Authentication-Info"] = "Bearer-Update = " + refreshed;
-            res.Headers["Access-Control-Expose-Headers"] = "Authentication-Info";
+            res.Headers[c_authenticationInfoHeader] = "Bearer-Update = " + refreshed;
+            res.Headers["Access-Control-Expose-Headers"] = c_authenticationInfoHeader;
         }
 
         private static string GetOrigin(HttpRequest req)
@@ -498,6 +529,7 @@ namespace Bredd.AzureFunctions
             var res = context.HttpContext.Response;
             res.ContentType = "application/json";
             res.Headers["Authentication-Info"] = "Bearer-Update = " + m_token;
+            res.Headers["Access-Control-Expose-Headers"] = "Authentication-Info";
             return res.WriteAsync(string.Format(c_jsonBody, m_token, m_expiresInSeconds));
         }
 
